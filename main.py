@@ -7,15 +7,12 @@ import random
 
 from algorithms.astar_pathfinder import AStarPathfinder
 from algorithms.hmm_predictor import HMMTrafficPredictor
-from algorithms.fuzzy_logic import FuzzyUrgencyController
-from algorithms.genetic_fleet import GeneticFleetOptimizer
 from algorithms.bayesian_risk import BayesianRiskNet
 from algorithms.minimax_adversary import MinimaxAdversary
-from database.telemetry import TelemetryLogger
 
 # ---------------- CONFIG ---------------- #
 
-st.set_page_config(page_title="PSG Tech Autonomous Fleet AI", layout="wide")
+st.set_page_config(page_title="Autonomous Fleet Duel Intelligence", layout="wide")
 
 def grid_to_gps(r, c, base_lat=11.0247, base_lon=77.0028, step=0.0015):
     return base_lat - (r * step), base_lon + (c * step)
@@ -23,9 +20,6 @@ def grid_to_gps(r, c, base_lat=11.0247, base_lon=77.0028, step=0.0015):
 # ---------------- SESSION INIT ---------------- #
 
 if "initialized" not in st.session_state:
-
-    st.session_state.logger = TelemetryLogger(batch_size=5)
-    st.session_state.fuzzy = FuzzyUrgencyController()
     st.session_state.hmm = HMMTrafficPredictor(
         ['Clear', 'Congested'],
         ['Fast', 'Slow'],
@@ -34,12 +28,6 @@ if "initialized" not in st.session_state:
         [[0.9, 0.1], [0.2, 0.8]]
     )
     st.session_state.bayesian = BayesianRiskNet()
-
-    tasks = [f"ORD-{i:03d}" for i in range(20)]
-    vehicles = ["TRK-A", "TRK-B", "TRK-C"]
-    ga = GeneticFleetOptimizer(tasks, vehicles)
-    st.session_state.fleet_assignment = ga.optimize()
-
     st.session_state.initialized = True
 
 # ---------------- GRID ---------------- #
@@ -59,154 +47,143 @@ grid = [
 
 start = (0, 0)
 
-# ---------------- RANDOM GOAL ---------------- #
-
 def generate_random_goal(grid, start):
-    rows = len(grid)
-    cols = len(grid[0])
     while True:
-        r = random.randint(0, rows - 1)
-        c = random.randint(0, cols - 1)
+        r = random.randint(0, 9)
+        c = random.randint(0, 9)
         if grid[r][c] == 0 and (r, c) != start:
             return (r, c)
 
-# ---------------- PATH EVALUATION ---------------- #
+goal = generate_random_goal(grid, start)
 
-def evaluate_path(path):
-    length = len(path)
-    congestion = 0
+# ---------------- PATH GENERATION ---------------- #
 
-    for i in range(length):
-        if i % 3 == 0:
-            congestion += 0.7
-        else:
-            congestion += 0.2
+astar = AStarPathfinder(grid)
+user_path = astar.find_path(start, goal)
 
-    avg_congestion = congestion / length
-    cost = length + (avg_congestion * 10)
-
-    return length, avg_congestion, cost
-
-def generate_adversary_path(grid, start, goal):
-    astar = AStarPathfinder(grid)
-    base_path = astar.find_path(start, goal)
-
-    if not base_path:
-        return []
-
-    adversary_path = base_path[:]
-
-    # inject detours
+def generate_adversary_path(base_path):
+    path = base_path.copy()
     for _ in range(3):
-        if len(adversary_path) < 3:
-            break
+        if len(path) > 3:
+            idx = random.randint(1, len(path)-2)
+            r, c = path[idx]
+            neighbors = [(r+1,c),(r-1,c),(r,c+1),(r,c-1)]
+            random.shuffle(neighbors)
+            for nr, nc in neighbors:
+                if 0 <= nr < 10 and 0 <= nc < 10 and grid[nr][nc] == 0:
+                    path.insert(idx,(nr,nc))
+                    break
+    return path
 
-        idx = random.randint(1, len(adversary_path)-2)
-        r, c = adversary_path[idx]
+adversary_path = generate_adversary_path(user_path)
 
-        neighbors = [(r+1,c), (r-1,c), (r,c+1), (r,c-1)]
-        random.shuffle(neighbors)
+# ---------------- PRE-MISSION DUEL PANEL ---------------- #
 
-        for nr, nc in neighbors:
-            if 0 <= nr < 10 and 0 <= nc < 10 and grid[nr][nc] == 0:
-                adversary_path.insert(idx, (nr, nc))
-                break
+st.markdown("## 🧠 Pre-Mission Duel Intelligence")
 
-    return adversary_path
+if not user_path:
+    st.error("No route available.")
+    st.stop()
 
-# ---------------- UI ---------------- #
+user_length = len(user_path)
+adv_length = len(adversary_path)
 
-col_map, col_side = st.columns([2, 1])
-map_placeholder = col_map.empty()
-metrics_placeholder = col_side.empty()
+# HMM Prediction
+obs_seq = ["Fast","Slow","Fast"]
+traffic_probs = st.session_state.hmm.forward_algorithm(obs_seq)
+expected_congestion = traffic_probs[1]
 
-if st.sidebar.button("DISPATCH TRK-A"):
+# Bayesian Risk
+iteration = random.randint(1,10)
+is_raining = st.session_state.bayesian.get_weather_state(iteration)
+delay_user = st.session_state.bayesian.infer_delay_probability(
+    is_raining, expected_congestion > 0.5
+)
 
-    goal = generate_random_goal(grid, start)
-    st.sidebar.success(f"New Destination: {goal}")
+delay_adv = min(1.0, delay_user + 0.15)  # adversary assumed slightly worse
 
-    astar = AStarPathfinder(grid)
-    user_path = astar.find_path(start, goal)
-    adversary_path = generate_adversary_path(grid, start, goal)
+success_user = max(0.0, 1 - (delay_user * expected_congestion))
+success_adv = max(0.0, 1 - (delay_adv * expected_congestion))
 
-    if not user_path:
-        st.error("No valid path found.")
-        st.stop()
+col1, col2 = st.columns(2)
 
-    total_user = len(user_path)
-    total_adv = len(adversary_path)
+with col1:
+    st.markdown("### 🚛 Your Forecast")
+    st.metric("Path Length", user_length)
+    st.metric("Delay Probability", f"{delay_user:.2f}")
+    st.metric("Success Probability", f"{success_user:.2f}")
 
-    max_steps = max(total_user, total_adv)
-    sleep_time = 0.6
+with col2:
+    st.markdown("### 🧠 Adversary Forecast")
+    st.metric("Path Length", adv_length)
+    st.metric("Delay Probability", f"{delay_adv:.2f}")
+    st.metric("Success Probability", f"{success_adv:.2f}")
 
-    user_cum_cong = 0
-    adv_cum_cong = 0
+if success_user > success_adv:
+    st.success("🏆 Pre-Mission Advantage: YOU")
+elif success_user < success_adv:
+    st.error("⚠ Pre-Mission Advantage: ADVERSARY")
+else:
+    st.info("⚖ Balanced Duel")
 
-    start_time = time.time()
+st.markdown("---")
+
+# ---------------- LIVE DUEL ---------------- #
+
+if st.button("🚀 START DUEL"):
+
+    map_placeholder = st.empty()
+    metrics_placeholder = st.empty()
+
+    max_steps = max(len(user_path), len(adversary_path))
+    user_cum = 0
+    adv_cum = 0
 
     for step in range(max_steps):
 
-        # ---------------- USER STEP ----------------
-        if step < total_user:
+        if step < len(user_path):
             ur, uc = user_path[step]
             user_lat, user_lon = grid_to_gps(ur, uc)
-            user_current_cong = np.random.uniform(0.2, 0.8)
-            user_cum_cong += user_current_cong
-            user_avg_cong = user_cum_cong / (step + 1)
+            user_cong = np.random.uniform(0.2,0.7)
+            user_cum += user_cong
+            user_avg = user_cum/(step+1)
         else:
-            user_current_cong = 0
-            user_avg_cong = user_cum_cong / total_user
+            user_avg = user_cum/len(user_path)
 
-        # ---------------- ADVERSARY STEP ----------------
-        if step < total_adv:
+        if step < len(adversary_path):
             ar, ac = adversary_path[step]
             adv_lat, adv_lon = grid_to_gps(ar, ac)
-            adv_current_cong = np.random.uniform(0.3, 0.9)
-            adv_cum_cong += adv_current_cong
-            adv_avg_cong = adv_cum_cong / (step + 1)
+            adv_cong = np.random.uniform(0.3,0.9)
+            adv_cum += adv_cong
+            adv_avg = adv_cum/(step+1)
         else:
-            adv_current_cong = 0
-            adv_avg_cong = adv_cum_cong / total_adv
-
-        elapsed = time.time() - start_time
-
-        # ---------------- MAP ----------------
-        user_latlon = [grid_to_gps(x, y) for x, y in user_path]
-        adv_latlon = [grid_to_gps(x, y) for x, y in adversary_path]
+            adv_avg = adv_cum/len(adversary_path)
 
         layers = [
-            # Adversary path
             pdk.Layer(
                 "PathLayer",
-                pd.DataFrame({
-                    "path": [[[lon2, lat2] for lat2, lon2 in adv_latlon]]
-                }),
+                pd.DataFrame({"path":[[[grid_to_gps(x,y)[1],grid_to_gps(x,y)[0]] for x,y in user_path]]}),
                 get_path="path",
-                get_color=[255, 0, 255],
-                get_width=4,
-            ),
-            # User path
-            pdk.Layer(
-                "PathLayer",
-                pd.DataFrame({
-                    "path": [[[lon2, lat2] for lat2, lon2 in user_latlon]]
-                }),
-                get_path="path",
-                get_color=[0, 150, 255],
+                get_color=[0,150,255],
                 get_width=6,
             ),
-            # User truck
+            pdk.Layer(
+                "PathLayer",
+                pd.DataFrame({"path":[[[grid_to_gps(x,y)[1],grid_to_gps(x,y)[0]] for x,y in adversary_path]]}),
+                get_path="path",
+                get_color=[255,0,255],
+                get_width=4,
+            ),
             pdk.Layer(
                 "ScatterplotLayer",
-                pd.DataFrame({"lat":[user_lat], "lon":[user_lon]}),
+                pd.DataFrame({"lat":[user_lat],"lon":[user_lon]}),
                 get_position='[lon, lat]',
                 get_radius=120,
                 get_fill_color=[255,50,50],
             ),
-            # Adversary truck
             pdk.Layer(
                 "ScatterplotLayer",
-                pd.DataFrame({"lat":[adv_lat], "lon":[adv_lon]}),
+                pd.DataFrame({"lat":[adv_lat],"lon":[adv_lon]}),
                 get_position='[lon, lat]',
                 get_radius=120,
                 get_fill_color=[255,0,255],
@@ -224,37 +201,23 @@ if st.sidebar.button("DISPATCH TRK-A"):
 
         map_placeholder.pydeck_chart(deck)
 
-        # ---------------- DASHBOARD ----------------
         with metrics_placeholder.container():
+            st.markdown("### 🔥 Live Duel Metrics")
+            colA, colB = st.columns(2)
 
-            st.markdown("## 🚀 Live Duel Dashboard")
+            with colA:
+                st.metric("Your Avg Congestion", f"{user_avg:.2f}")
 
-            col1, col2 = st.columns(2)
+            with colB:
+                st.metric("Adversary Avg Congestion", f"{adv_avg:.2f}")
 
-            with col1:
-                st.markdown("### 🚛 Your Fleet")
-                st.metric("Steps Completed", min(step+1, total_user))
-                st.metric("Avg Congestion", f"{user_avg_cong:.2f}")
-                st.metric("Current Congestion", f"{user_current_cong:.2f}")
-                st.progress(min((step+1)/total_user,1.0))
-
-            with col2:
-                st.markdown("### 🧠 Adversary")
-                st.metric("Steps Completed", min(step+1, total_adv))
-                st.metric("Avg Congestion", f"{adv_avg_cong:.2f}")
-                st.metric("Current Congestion", f"{adv_current_cong:.2f}")
-                st.progress(min((step+1)/total_adv,1.0))
-
-            st.markdown("---")
-
-            # Live winner indicator
-            if user_avg_cong < adv_avg_cong:
-                st.success("🏆 Advantage: YOUR PATH")
-            elif user_avg_cong > adv_avg_cong:
-                st.error("⚠ Advantage: ADVERSARY")
+            if user_avg < adv_avg:
+                st.success("🏆 You Leading")
+            elif user_avg > adv_avg:
+                st.error("⚠ Adversary Leading")
             else:
-                st.info("⚖ Currently Balanced")
+                st.info("⚖ Equal")
 
-        time.sleep(sleep_time)
+        time.sleep(0.6)
 
-    st.success("Simulation Completed")
+    st.success("Duel Completed")
