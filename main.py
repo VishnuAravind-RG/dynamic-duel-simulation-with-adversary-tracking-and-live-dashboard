@@ -10,29 +10,17 @@ Action Space A = { speed_mode ∈ {0: cautious, 1: normal, 2: aggressive} }
 Reward Function R(s,a) = -[ α·travel_time + β·traffic + γ·weather_risk + δ·fuel ]
 Terminal Condition: goal reached or timeout.
 
-Core Algorithms Compared (now genuinely executed):
-- Q-Learning (RL) – trained online, then evaluated
+Core Algorithms Compared:
+- Q-Learning (RL) – trained on stochastic environment, evaluated across conditions
 - A* (deterministic baseline)
 - Value Iteration (MDP optimal planner)
-- Genetic Algorithm (heuristic optimizer)
+- Genetic Algorithm (evolutionary path optimizer)
 - Random (lower bound)
-
-Supporting Modules (for environment simulation):
-- HMM for traffic evolution
-- Bayesian network for weather
-- CSP for task scheduling (optional)
-- Minimax for adversary (optional)
-
-Experimental Setup:
-- 1000 Monte Carlo simulations per algorithm under 5 traffic conditions
-- Fixed random seeds for reproducibility
-- Statistical significance via t-test (RL vs A*)
-- Learning curves and cumulative regret analysis
 
 Dashboard Features:
 - 3D Duel Arena with real‑time fleet battle
 - Interactive AI Lab (Fuzzy, MDP, Neural Nets)
-- Blockchain‑secured mission logging (side feature)
+- Blockchain‑secured mission logging
 - Full benchmarking with statistical displays
 """
 
@@ -50,7 +38,7 @@ from collections import deque
 from scipy import stats
 import pydeck as pdk
 
-# Import algorithm modules (ensure these paths are correct)
+# Import algorithm modules
 from algorithms.astar_pathfinder import AStarPathfinder
 from algorithms.rl_controller import RLTrafficController
 from algorithms.genetic_fleet import GeneticFleetOptimizer
@@ -93,13 +81,16 @@ class CostFunction:
 # =====================================================================
 
 class FleetEnvironment:
-    def __init__(self, grid_size=10, cost_function=None, seed=None):
+    def __init__(self, grid_size=10, cost_function=None, seed=None, fixed_grid=True, grid=None):
         if seed is not None:
             random.seed(seed)
             np.random.seed(seed)
         self.grid_size = grid_size
         self.cost = cost_function or CostFunction()
-        self.grid = self._generate_grid()
+        if grid is not None:
+            self.grid = grid
+        else:
+            self.grid = self._generate_grid() if fixed_grid else None
         self.traffic_hmm = HMMTrafficPredictor(
             ['Clear', 'Congested'],
             ['Fast', 'Slow'],
@@ -108,6 +99,7 @@ class FleetEnvironment:
             [[0.9, 0.1], [0.2, 0.8]]
         )
         self.weather_bn = BayesianRiskNet()
+        # if not fixed_grid, grid will be generated per simulation
 
     def _generate_grid(self, obstacle_density=0.2):
         grid = np.zeros((self.grid_size, self.grid_size))
@@ -149,11 +141,9 @@ class FleetEnvironment:
     def get_fuel(self, path_length, traffic):
         return path_length * 0.5 * (1 + traffic * 0.3)
 
-    def simulate_episode(self, algorithm, condition, start=(0,0), goal=(9,9), rl_agent=None):
-        """
-        Run one episode for a given algorithm under given condition.
-        Returns a result dictionary.
-        """
+    def simulate_episode(self, algorithm, condition, start=(0,0), goal=(9,9), rl_agent=None, grid=None):
+        if grid is not None:
+            self.grid = grid  # use provided grid for this simulation
         start_time = time.time()
         traffic = self.get_traffic(condition)
         weather = self.get_weather(condition)
@@ -163,13 +153,15 @@ class FleetEnvironment:
             finder = AStarPathfinder(self.grid)
             path = finder.find_path(start, goal)
             travel_time = len(path) if path else 999
+            reached = 1 if path else 0
             iterations = len(path)
 
         # --- RL (Q-learning) ---
         elif algorithm == "RL":
             if rl_agent is None:
-                rl_agent = RLTrafficController()
-            travel_time = self._simulate_rl_policy(rl_agent, start, goal, traffic, weather)
+                travel_time, reached = 999, 0
+            else:
+                travel_time, reached = rl_agent.greedy_path_length(self, start, goal, condition)
             iterations = 50
 
         # --- MDP (Value Iteration) ---
@@ -177,21 +169,21 @@ class FleetEnvironment:
             mdp = MDPPolicyIterator(self.grid, goal)
             mdp.value_iteration(max_iterations=100)
             policy = mdp.get_policy()
-            travel_time = self._simulate_mdp_policy(policy, start, goal)
+            travel_time, reached = self._simulate_mdp_policy(policy, start, goal)
             iterations = 100
 
-        # --- Genetic Algorithm ---
+        # --- Genetic Algorithm (now real) ---
         elif algorithm == "Genetic":
-            travel_time = self._simulate_genetic_path(start, goal)
+            travel_time, reached = self._genetic_path(start, goal)
             iterations = 20 * 30
 
         # --- Random baseline ---
         elif algorithm == "Random":
-            travel_time = self._random_walk(start, goal)
+            travel_time, reached = self._random_walk(start, goal)
             iterations = travel_time
 
         else:
-            travel_time = 999
+            travel_time, reached = 999, 0
             iterations = 0
 
         fuel = self.get_fuel(travel_time, traffic)
@@ -208,17 +200,8 @@ class FleetEnvironment:
             'total_cost': total_cost,
             'computation_ms': comp_time,
             'iterations': iterations,
-            'success': 1 if travel_time < 20 else 0
+            'success': reached  # 1 if goal reached, else 0
         }
-
-    # --- Helper methods for algorithm simulation ---
-
-    def _simulate_rl_policy(self, agent, start, goal, traffic, weather):
-        if hasattr(agent, 'avg_episode_length'):
-            return int(agent.avg_episode_length)
-        else:
-            dist = abs(start[0]-goal[0]) + abs(start[1]-goal[1])
-            return dist + random.randint(-1, 2)
 
     def _simulate_mdp_policy(self, policy, start, goal):
         pos = start
@@ -234,14 +217,81 @@ class FleetEnvironment:
             if 0 <= new_r < self.grid_size and 0 <= new_c < self.grid_size and self.grid[new_r][new_c] == 0:
                 pos = (new_r, new_c)
             steps += 1
-        if pos == goal:
-            return steps
-        else:
-            return abs(start[0]-goal[0]) + abs(start[1]-goal[1]) + 5
+        reached = 1 if pos == goal else 0
+        return steps, reached
 
-    def _simulate_genetic_path(self, start, goal):
-        dist = abs(start[0]-goal[0]) + abs(start[1]-goal[1])
-        return dist + random.randint(0, 3)
+    def _genetic_path(self, start, goal):
+        """Use genetic algorithm to evolve a path."""
+        # We'll use a simple chromosome representation: list of directions (0-3)
+        # Fitness = negative of path length (shorter is better)
+        # For simplicity, we'll use a pre‑implemented GA from genetic_fleet.py
+        # But that module is designed for task allocation, not path planning.
+        # We'll create a minimal GA here.
+        pop_size = 50
+        generations = 30
+        max_len = 30
+
+        def random_chromosome():
+            return [random.randint(0,3) for _ in range(random.randint(10, max_len))]
+
+        def decode(chrom):
+            pos = start
+            path = [pos]
+            for d in chrom:
+                if d == 0: new = (pos[0]-1, pos[1])
+                elif d == 1: new = (pos[0]+1, pos[1])
+                elif d == 2: new = (pos[0], pos[1]-1)
+                else: new = (pos[0], pos[1]+1)
+                if (0 <= new[0] < self.grid_size and 0 <= new[1] < self.grid_size and
+                        self.grid[new[0]][new[1]] == 0):
+                    pos = new
+                    path.append(pos)
+                if pos == goal:
+                    break
+            return path
+
+        def fitness(chrom):
+            path = decode(chrom)
+            if path[-1] == goal:
+                return -len(path)  # shorter is better
+            else:
+                return -1000  # heavy penalty
+
+        # Initialize population
+        pop = [random_chromosome() for _ in range(pop_size)]
+        for gen in range(generations):
+            # Evaluate
+            scored = [(fitness(ind), ind) for ind in pop]
+            scored.sort(reverse=True)  # higher fitness first
+            # Select top half
+            survivors = [ind for _, ind in scored[:pop_size//2]]
+            # Crossover & mutate
+            new_pop = []
+            while len(new_pop) < pop_size:
+                p1 = random.choice(survivors)
+                p2 = random.choice(survivors)
+                # single‑point crossover
+                if len(p1) > 1 and len(p2) > 1:
+                    pt = random.randint(1, min(len(p1), len(p2))-1)
+                    child = p1[:pt] + p2[pt:]
+                else:
+                    child = p1[:]
+                # mutation
+                if random.random() < 0.1:
+                    if child and random.random() < 0.5:
+                        idx = random.randint(0, len(child)-1)
+                        child[idx] = random.randint(0,3)
+                    else:
+                        child.append(random.randint(0,3))
+                new_pop.append(child)
+            pop = new_pop
+
+        # Best individual
+        best = max(pop, key=fitness)
+        path = decode(best)
+        steps = len(path) - 1
+        reached = 1 if path[-1] == goal else 0
+        return steps, reached
 
     def _random_walk(self, start, goal):
         pos = start
@@ -254,27 +304,31 @@ class FleetEnvironment:
             if 0 <= new_r < self.grid_size and 0 <= new_c < self.grid_size and self.grid[new_r][new_c] == 0:
                 pos = (new_r, new_c)
             steps += 1
-        return steps if pos == goal else max_steps
+        reached = 1 if pos == goal else 0
+        return steps, reached
 
 # =====================================================================
 # BENCHMARK ENGINE
 # =====================================================================
 
 class BenchmarkEngine:
-    def __init__(self, n_simulations=500, seed=None):
+    def __init__(self, n_simulations=500, seed=None, randomize_grid=False):
         self.n_simulations = n_simulations
         self.seed = seed
-        self.env = FleetEnvironment(seed=seed)
+        self.randomize_grid = randomize_grid
+        self.base_env = FleetEnvironment(seed=seed, fixed_grid=not randomize_grid)
         self.algorithms = ["A*", "RL", "Genetic", "MDP", "Random"]
         self.conditions = ["low", "medium", "high", "stochastic", "adversarial"]
         self.results = []
+        # Train RL agent once on a representative environment (stochastic, medium)
+        # We'll use a fixed grid for training (the base_env's grid)
         self.rl_agent = self._train_rl_agent()
 
     def _train_rl_agent(self, episodes=500):
-        agent = RLTrafficController()
-        # Simulate training: we set an average episode length
-        # In a real implementation, you would actually train the agent here.
-        agent.avg_episode_length = 10.5
+        agent = RLTrafficController(seed=self.seed)
+        # Use base_env for training (it has a fixed grid)
+        history = agent.train(self.base_env, start=(0,0), goal=(9,9), episodes=episodes)
+        agent.training_history = history
         return agent
 
     def run(self, progress_callback=None):
@@ -284,10 +338,18 @@ class BenchmarkEngine:
         for algo in self.algorithms:
             for cond in self.conditions:
                 for sim in range(self.n_simulations):
-                    if algo == "RL":
-                        res = self.env.simulate_episode(algo, cond, rl_agent=self.rl_agent)
+                    # Create a fresh environment for each simulation if randomize_grid
+                    if self.randomize_grid:
+                        env = FleetEnvironment(seed=self.seed+sim, fixed_grid=False)
+                        grid = env.grid
                     else:
-                        res = self.env.simulate_episode(algo, cond)
+                        env = self.base_env
+                        grid = self.base_env.grid
+
+                    if algo == "RL":
+                        res = env.simulate_episode(algo, cond, rl_agent=self.rl_agent, grid=grid)
+                    else:
+                        res = env.simulate_episode(algo, cond, grid=grid)
                     self.results.append(res)
                     count += 1
                     if progress_callback:
@@ -347,16 +409,9 @@ class BenchmarkEngine:
         return pd.concat(regret, ignore_index=True)
 
     def get_rl_training_history(self):
-        episodes = np.arange(1, 501)
-        reward = -50 + 150 * (1 - np.exp(-episodes / 150)) + np.random.normal(0, 10, 500)
-        cost = 120 - 50 * (1 - np.exp(-episodes / 200)) + np.random.normal(0, 5, 500)
-        exploration = np.maximum(0.05, 1.0 * np.exp(-episodes / 150))
-        return pd.DataFrame({
-            'episode': episodes,
-            'reward': reward,
-            'cost': cost,
-            'exploration': exploration
-        })
+        if hasattr(self.rl_agent, 'training_history'):
+            return self.rl_agent.training_history
+        return []
 
 # =====================================================================
 # BLOCKCHAIN LOGGER (side feature)
@@ -380,7 +435,7 @@ class BlockchainLogger:
         return self.chain[-1]['hash'] if self.chain else "0"*8
 
 # =====================================================================
-# 3D VISUALIZATION HELPERS (unchanged, kept for duel arena)
+# 3D VISUALIZATION HELPERS (unchanged)
 # =====================================================================
 
 def grid_to_gps(r, c, base_lat=11.0247, base_lon=77.0028, step=0.0015):
@@ -465,8 +520,12 @@ st.markdown("""
 
 if 'initialized' not in st.session_state:
     st.session_state.cost_func = CostFunction()
-    st.session_state.env = FleetEnvironment(cost_function=st.session_state.cost_func, seed=st.session_state.random_seed)
-    st.session_state.benchmark = BenchmarkEngine(n_simulations=500, seed=st.session_state.random_seed)
+    st.session_state.base_env = FleetEnvironment(cost_function=st.session_state.cost_func,
+                                                 seed=st.session_state.random_seed,
+                                                 fixed_grid=True)
+    st.session_state.benchmark = BenchmarkEngine(n_simulations=500,
+                                                 seed=st.session_state.random_seed,
+                                                 randomize_grid=False)
     st.session_state.results_df = None
     st.session_state.summary_df = None
     st.session_state.ttest_df = None
@@ -476,10 +535,10 @@ if 'initialized' not in st.session_state:
     st.session_state.system_uptime = time.time()
     st.session_state.show_victory = False
     st.session_state.victor = "YOUR FLEET"
-    # Precompute paths for duel arena
+    # Precompute paths for duel arena using base_env
     start = (0, 0)
     goal = (9, 9)
-    finder = AStarPathfinder(st.session_state.env.grid)
+    finder = AStarPathfinder(st.session_state.base_env.grid)
     st.session_state.user_path = finder.find_path(start, goal)
     if not st.session_state.user_path:
         st.session_state.user_path = [(0,0), (1,0), (2,0), (3,0), (4,0), (5,0), (6,0), (7,0), (8,0), (9,0), (9,1), (9,2), (9,3), (9,4), (9,5), (9,6), (9,7), (9,8), (9,9)]
@@ -500,7 +559,7 @@ with st.sidebar:
         delta = st.slider("δ (fuel)", 0.0, 5.0, 1.5, 0.1)
         if st.button("Update"):
             st.session_state.cost_func = CostFunction(alpha, beta, gamma, delta)
-            st.session_state.env.cost = st.session_state.cost_func
+            st.session_state.base_env.cost = st.session_state.cost_func
             st.success("Updated")
     st.markdown("---")
     st.markdown("### 🎲 Reproducibility")
@@ -511,10 +570,18 @@ with st.sidebar:
         np.random.seed(seed)
         st.session_state.benchmark = BenchmarkEngine(
             n_simulations=st.session_state.benchmark.n_simulations,
-            seed=seed
+            seed=seed,
+            randomize_grid=st.session_state.benchmark.randomize_grid
         )
-        st.session_state.env = FleetEnvironment(cost_function=st.session_state.cost_func, seed=seed)
+        st.session_state.base_env = FleetEnvironment(cost_function=st.session_state.cost_func,
+                                                     seed=seed, fixed_grid=True)
         st.success(f"Seed set to {seed}")
+    st.markdown("---")
+    st.markdown("### 🧪 Benchmark Settings")
+    randomize_grid = st.checkbox("Randomize grid per simulation", value=False)
+    if randomize_grid != st.session_state.benchmark.randomize_grid:
+        st.session_state.benchmark.randomize_grid = randomize_grid
+        st.rerun()
     st.markdown("---")
     st.markdown("### 📊 System")
     uptime = time.time() - st.session_state.system_uptime
@@ -525,8 +592,12 @@ with st.sidebar:
     st.markdown("### 🚀 Benchmark")
     n_sims = st.slider("Simulations per condition", 100, 1000, 500, 50)
     if st.button("RUN BENCHMARK", type="primary"):
-        st.session_state.benchmark = BenchmarkEngine(n_simulations=n_sims, seed=st.session_state.random_seed)
-        st.session_state.benchmark.env.cost = st.session_state.cost_func
+        st.session_state.benchmark = BenchmarkEngine(
+            n_simulations=n_sims,
+            seed=st.session_state.random_seed,
+            randomize_grid=st.session_state.benchmark.randomize_grid
+        )
+        st.session_state.benchmark.base_env.cost = st.session_state.cost_func
         prog = st.progress(0)
         status = st.empty()
         def update(p):
@@ -592,7 +663,7 @@ with tab1:
         if st.button("🚀 INITIATE DUEL", type="primary", use_container_width=True):
             user_path = st.session_state.user_path
             adv_path = st.session_state.adversary_path
-            grid = st.session_state.env.grid
+            grid = st.session_state.base_env.grid
             building_heights = np.random.randint(0, 30, (10, 10))
 
             map_placeholder = st.empty()
@@ -739,21 +810,22 @@ with tab2:
     else:
         st.info("Run benchmark from sidebar to see results.")
 
-# ---------- Tab 3: RL Analysis ----------
+# ---------- Tab 3: RL Analysis (real training history) ----------
 with tab3:
     st.markdown("# 📈 Reinforcement Learning Analysis")
     if st.session_state.results_df is not None:
-        train_df = st.session_state.benchmark.get_rl_training_history()
-        fig1 = px.line(train_df, x='episode', y='reward', title="Learning Curve: Average Reward")
-        fig1.add_scatter(x=train_df['episode'], y=train_df['reward'].rolling(50).mean(), name='Moving Avg')
-        st.plotly_chart(fig1, use_container_width=True)
-
-        fig2 = px.line(train_df, x='episode', y='cost', title="Learning Curve: Cost")
-        fig2.add_scatter(x=train_df['episode'], y=train_df['cost'].rolling(50).mean(), name='Moving Avg')
-        st.plotly_chart(fig2, use_container_width=True)
-
-        fig3 = px.line(train_df, x='episode', y='exploration', title="Exploration Rate Decay")
-        st.plotly_chart(fig3, use_container_width=True)
+        history = st.session_state.benchmark.get_rl_training_history()
+        if history:
+            df_train = pd.DataFrame({
+                'episode': list(range(1, len(history)+1)),
+                'steps': history
+            })
+            fig1 = px.line(df_train, x='episode', y='steps', title="Learning Curve: Steps per Episode")
+            fig1.add_scatter(x=df_train['episode'], y=df_train['steps'].rolling(50).mean(), name='Moving Avg')
+            st.plotly_chart(fig1, use_container_width=True)
+            st.caption("**Note:** RL trained once on base grid; evaluated across all conditions. Noisy curve is honest.")
+        else:
+            st.info("No training history available yet.")
 
         if st.session_state.regret_df is not None:
             regret_df = st.session_state.regret_df
@@ -767,7 +839,7 @@ with tab3:
     else:
         st.info("Run benchmark first to generate RL analysis data.")
 
-# ---------- Tab 4: AI Lab (with enhanced Neural Network) ----------
+# ---------- Tab 4: AI Lab ----------
 with tab4:
     st.markdown("# 🧪 AI Laboratory (Interactive)")
     col_a, col_b = st.columns(2)
@@ -811,27 +883,17 @@ with tab4:
         st.table(df_pol)
 
     st.markdown("---")
-    st.markdown("## 🧬 Neural Network Visualizer (Interactive)")
-
-    col_n1, col_n2 = st.columns([1, 2])
+    st.markdown("## 🧬 Neural Network Visualizer")
+    col_n1, col_n2 = st.columns([1,2])
     with col_n1:
-        layers = st.multiselect(
-            "Hidden layers",
-            ["4", "8", "16", "32", "64", "128"],
-            default=["8", "4"]
-        )
+        layers = st.multiselect("Hidden layers", ["4","8","16","32","64","128"], default=["8","4"])
         activation = st.selectbox("Activation", ["ReLU", "Tanh", "Sigmoid"])
-        # Fix random seed for reproducibility
         np.random.seed(42)
 
-        # Build network
         layer_sizes = [4] + [int(l) for l in layers] + [3]
-        # Random input (batch of 1)
         x = np.random.randn(1, layer_sizes[0])
         weights = []
-        biases = []
         activations = [x]
-        # Forward pass
         for i in range(len(layer_sizes)-1):
             w = np.random.randn(layer_sizes[i], layer_sizes[i+1]) * 0.5
             b = np.random.randn(1, layer_sizes[i+1]) * 0.5
@@ -840,56 +902,33 @@ with tab4:
                 a = np.maximum(0, z)
             elif activation == "Tanh":
                 a = np.tanh(z)
-            else:  # Sigmoid
+            else:
                 a = 1 / (1 + np.exp(-z))
             activations.append(a)
             weights.append(w)
-            biases.append(b)
 
-        # Final output
         output = activations[-1][0]
         st.metric("Network Output", f"[{output[0]:.3f}, {output[1]:.3f}, {output[2]:.3f}]")
 
     with col_n2:
-        fig, ax = plt.subplots(figsize=(10, 6))
+        fig, ax = plt.subplots(figsize=(10,6))
         ax.set_facecolor('#2E3440')
         fig.patch.set_facecolor('#2E3440')
-
-        # Position nodes
         x_pos = np.linspace(0.1, 0.9, len(layer_sizes))
         y_pos = [np.linspace(0.1, 0.9, n) for n in layer_sizes]
-
-        # Draw connections with alpha based on weight magnitude
         for i in range(len(layer_sizes)-1):
             w = weights[i]
             for j in range(layer_sizes[i]):
                 for k in range(layer_sizes[i+1]):
-                    alpha = min(1.0, abs(w[j, k]) * 2)  # scale for visibility
-                    ax.plot([x_pos[i], x_pos[i+1]],
-                           [y_pos[i][j], y_pos[i+1][k]],
-                           '#81A1C1', linewidth=1, alpha=alpha)
-
-        # Draw nodes with color based on activation value
+                    alpha = min(1.0, abs(w[j,k])*2)
+                    ax.plot([x_pos[i], x_pos[i+1]], [y_pos[i][j], y_pos[i+1][k]], '#81A1C1', linewidth=1, alpha=alpha)
         for i, (x, y_l, act) in enumerate(zip(x_pos, y_pos, activations)):
-            # Normalize activations to [0,1] for coloring
             a_min, a_max = act.min(), act.max()
-            if a_max - a_min > 1e-6:
-                norm_act = (act - a_min) / (a_max - a_min)
-            else:
-                norm_act = np.zeros_like(act)
+            norm_act = (act - a_min) / (a_max - a_min) if a_max > a_min else np.zeros_like(act)
             for j, (y, val) in enumerate(zip(y_l, norm_act[0])):
-                # Color from light blue (low) to dark blue (high)
-                color = plt.cm.Blues(0.3 + 0.7 * val)
+                color = plt.cm.Blues(0.3 + 0.7*val)
                 ax.scatter(x, y, s=400, c=[color], edgecolors='white', linewidth=2, zorder=5)
-                # Optionally show small value
-                if layer_sizes[i] <= 8:  # only if few nodes
-                    ax.text(x, y-0.02, f"{activations[i][0][j]:.2f}",
-                            ha='center', va='top', fontsize=8, color='white')
-
-        ax.set_xlim(0, 1)
-        ax.set_ylim(0, 1)
-        ax.axis('off')
-        ax.set_title(f"Network: {activation} activation", color='white')
+        ax.set_xlim(0,1); ax.set_ylim(0,1); ax.axis('off')
         st.pyplot(fig)
 
 # ---------- Tab 5: Blockchain ----------
