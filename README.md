@@ -62,23 +62,24 @@ All algorithms optimize the same unified cost function to ensure fair comparison
 ---
 
 ## 4. System Architecture
+
+```
 Streamlit Dashboard
 │
 ├── Benchmark Engine
-│ ├── RL (Q-Learning)
-│ ├── A*
-│ ├── MDP (Value Iteration)
-│ ├── Genetic Algorithm
-│ └── Random Baseline
+│   ├── RL (Q-Learning)
+│   ├── A*
+│   ├── MDP (Value Iteration)
+│   ├── Genetic Algorithm
+│   └── Random Baseline
 │
 ├── Stochastic Environment
-│ ├── HMM Traffic Model
-│ ├── Bayesian Weather Model
-│ └── Unified Cost Function
+│   ├── HMM Traffic Model
+│   ├── Bayesian Weather Model
+│   └── Unified Cost Function
 │
 └── Blockchain Logger (SHA-256)
-
----
+```
 
 ## 5. Dashboard Features
 
@@ -140,22 +141,27 @@ All algorithms are implemented from scratch. No external RL libraries are used.
 ## 8. Installation
 
 Clone the repository:
+
+```
 git clone https://github.com/VishnuAravind-RG/dynamic-duel-simulation-with-adversary-tracking-and-live-dashboard.git
 cd dynamic-duel-simulation-with-adversary-tracking-and-live-dashboard
-
+```
 
 Install dependencies:
-pip install -r requirements.txt
 
+```
+pip install -r requirements.txt
+```
 
 Run the application:
-streamlit run main.py
 
+```
+streamlit run main.py
+```
 
 Then open:
 
 http://localhost:8501
-
 ---
 
 ## 9. Reproducibility
