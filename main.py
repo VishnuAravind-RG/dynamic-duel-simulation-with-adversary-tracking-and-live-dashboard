@@ -11,7 +11,7 @@ Reward Function R(s,a) = -[ α·travel_time + β·traffic + γ·weather_risk + �
 Terminal Condition: goal reached or timeout.
 
 Core Algorithms Compared:
-- Q-Learning (RL) – trained on stochastic environment, evaluated across conditions
+- Q-Learning (RL) – trained online, then evaluated
 - A* (deterministic baseline)
 - Value Iteration (MDP optimal planner)
 - Genetic Algorithm (evolutionary path optimizer)
@@ -90,6 +90,7 @@ class FleetEnvironment:
         if grid is not None:
             self.grid = grid
         else:
+            # Generate a new grid only if fixed_grid is True, otherwise leave as None (will be generated per simulation)
             self.grid = self._generate_grid() if fixed_grid else None
         self.traffic_hmm = HMMTrafficPredictor(
             ['Clear', 'Congested'],
@@ -99,7 +100,6 @@ class FleetEnvironment:
             [[0.9, 0.1], [0.2, 0.8]]
         )
         self.weather_bn = BayesianRiskNet()
-        # if not fixed_grid, grid will be generated per simulation
 
     def _generate_grid(self, obstacle_density=0.2):
         grid = np.zeros((self.grid_size, self.grid_size))
@@ -142,8 +142,12 @@ class FleetEnvironment:
         return path_length * 0.5 * (1 + traffic * 0.3)
 
     def simulate_episode(self, algorithm, condition, start=(0,0), goal=(9,9), rl_agent=None, grid=None):
+        # Use provided grid if given, otherwise use self.grid (must not be None)
         if grid is not None:
-            self.grid = grid  # use provided grid for this simulation
+            self.grid = grid
+        # Ensure grid exists
+        if self.grid is None:
+            raise ValueError("Environment grid is None. Cannot simulate episode.")
         start_time = time.time()
         traffic = self.get_traffic(condition)
         weather = self.get_weather(condition)
@@ -172,7 +176,7 @@ class FleetEnvironment:
             travel_time, reached = self._simulate_mdp_policy(policy, start, goal)
             iterations = 100
 
-        # --- Genetic Algorithm (now real) ---
+        # --- Genetic Algorithm ---
         elif algorithm == "Genetic":
             travel_time, reached = self._genetic_path(start, goal)
             iterations = 20 * 30
@@ -221,12 +225,7 @@ class FleetEnvironment:
         return steps, reached
 
     def _genetic_path(self, start, goal):
-        """Use genetic algorithm to evolve a path."""
-        # We'll use a simple chromosome representation: list of directions (0-3)
-        # Fitness = negative of path length (shorter is better)
-        # For simplicity, we'll use a pre‑implemented GA from genetic_fleet.py
-        # But that module is designed for task allocation, not path planning.
-        # We'll create a minimal GA here.
+        # Simple genetic algorithm for path evolution
         pop_size = 50
         generations = 30
         max_len = 30
@@ -238,10 +237,14 @@ class FleetEnvironment:
             pos = start
             path = [pos]
             for d in chrom:
-                if d == 0: new = (pos[0]-1, pos[1])
-                elif d == 1: new = (pos[0]+1, pos[1])
-                elif d == 2: new = (pos[0], pos[1]-1)
-                else: new = (pos[0], pos[1]+1)
+                if d == 0:
+                    new = (pos[0]-1, pos[1])
+                elif d == 1:
+                    new = (pos[0]+1, pos[1])
+                elif d == 2:
+                    new = (pos[0], pos[1]-1)
+                else:
+                    new = (pos[0], pos[1]+1)
                 if (0 <= new[0] < self.grid_size and 0 <= new[1] < self.grid_size and
                         self.grid[new[0]][new[1]] == 0):
                     pos = new
@@ -316,17 +319,17 @@ class BenchmarkEngine:
         self.n_simulations = n_simulations
         self.seed = seed
         self.randomize_grid = randomize_grid
-        self.base_env = FleetEnvironment(seed=seed, fixed_grid=not randomize_grid)
+        # Base environment for training – always uses a fixed grid
+        self.base_env = FleetEnvironment(seed=seed, fixed_grid=True)
         self.algorithms = ["A*", "RL", "Genetic", "MDP", "Random"]
         self.conditions = ["low", "medium", "high", "stochastic", "adversarial"]
         self.results = []
-        # Train RL agent once on a representative environment (stochastic, medium)
-        # We'll use a fixed grid for training (the base_env's grid)
+        # Train RL agent once on the fixed grid
         self.rl_agent = self._train_rl_agent()
 
     def _train_rl_agent(self, episodes=500):
         agent = RLTrafficController(seed=self.seed)
-        # Use base_env for training (it has a fixed grid)
+        # Use base_env (which has a fixed grid) for training
         history = agent.train(self.base_env, start=(0,0), goal=(9,9), episodes=episodes)
         agent.training_history = history
         return agent
@@ -338,18 +341,19 @@ class BenchmarkEngine:
         for algo in self.algorithms:
             for cond in self.conditions:
                 for sim in range(self.n_simulations):
-                    # Create a fresh environment for each simulation if randomize_grid
                     if self.randomize_grid:
+                        # Create a new environment with a fresh random grid for each simulation
                         env = FleetEnvironment(seed=self.seed+sim, fixed_grid=False)
-                        grid = env.grid
+                        # Generate the grid now
+                        env.grid = env._generate_grid()
                     else:
+                        # Reuse the base environment (same grid for all)
                         env = self.base_env
-                        grid = self.base_env.grid
 
                     if algo == "RL":
-                        res = env.simulate_episode(algo, cond, rl_agent=self.rl_agent, grid=grid)
+                        res = env.simulate_episode(algo, cond, rl_agent=self.rl_agent, grid=env.grid)
                     else:
-                        res = env.simulate_episode(algo, cond, grid=grid)
+                        res = env.simulate_episode(algo, cond, grid=env.grid)
                     self.results.append(res)
                     count += 1
                     if progress_callback:
@@ -597,6 +601,7 @@ with st.sidebar:
             seed=st.session_state.random_seed,
             randomize_grid=st.session_state.benchmark.randomize_grid
         )
+        # Ensure the base_env cost function is updated
         st.session_state.benchmark.base_env.cost = st.session_state.cost_func
         prog = st.progress(0)
         status = st.empty()
